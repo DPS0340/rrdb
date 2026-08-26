@@ -17,6 +17,20 @@ pub struct LaunchConfig {
     pub wal_directory: String,
     pub wal_segment_size: u32,
     pub wal_extension: String,
+
+    /// 쿼리 수준 메모리 상한 (bytes) (#265).
+    /// SELECT/UPDATE/DELETE 실행 중 추정 메모리가 이를 넘으면
+    /// 에러를 반환해 쿼리를 강제로 중단합니다.
+    /// `0`이면 비활성 (OOM killer 작동 안 함).
+    /// 기존 설정 파일에 이 필드가 없어도 동작하도록 serde default 적용.
+    #[serde(default = "default_max_query_memory_bytes")]
+    pub max_query_memory_bytes: u64,
+}
+
+/// 새 설정 필드가 사용자 TOML에서 빠져 있을 때의 기본값 (#265).
+/// 이 관리가 없으면 기존 rrdb.config를 가진 사용자는 업데이트 시 설정 로드가 실패합니다.
+fn default_max_query_memory_bytes() -> u64 {
+    128 * 1024 * 1024
 }
 
 #[allow(clippy::derivable_impls)]
@@ -40,6 +54,8 @@ impl std::default::Default for LaunchConfig {
                 .to_string(),
             wal_segment_size: 1024 * 1024 * 16, // 16MB 세그먼트 사이즈
             wal_extension: DEFAULT_WAL_EXTENSION.to_string(),
+            // 기본 128MB. 사용자가 메모리 퍼센트를 조절하면 TOML에서 설정.
+            max_query_memory_bytes: 128 * 1024 * 1024,
         }
     }
 }

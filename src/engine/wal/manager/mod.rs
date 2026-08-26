@@ -320,6 +320,7 @@ mod tests {
             wal_directory: wal_dir_path.to_str().unwrap().to_string(),
             wal_segment_size: 1024,
             wal_extension: "waltest".to_string(),
+            max_query_memory_bytes: 0,
         }
     }
 

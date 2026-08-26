@@ -5,6 +5,7 @@ pub mod lexer;
 pub mod optimizer;
 pub mod parser;
 pub mod path_identifier;
+pub mod query_memory;
 pub mod row_buffer;
 pub mod schema;
 pub mod server;
@@ -33,6 +34,7 @@ use crate::engine::ast::{DDLStatement, DMLStatement, OtherStatement, SQLStatemen
 use crate::engine::encoder::schema_encoder::StorageEncoder;
 use crate::engine::index::manager::IndexManager;
 use crate::engine::optimizer::statistics::StatisticsManager;
+use crate::engine::query_memory::QueryMemoryTracker;
 use crate::engine::row_buffer::RowBufferPool;
 use crate::engine::schema::table::TableSchema;
 use crate::engine::types::ExecuteResult;
@@ -56,6 +58,9 @@ pub struct DBEngine {
     /// 디스크의 인덱스 파일을 메모리로 적재했는지 여부 (최초 사용 시 1회 적재)
     pub(crate) indices_loaded: Arc<tokio::sync::OnceCell<()>>,
     pub(crate) row_buffer_pool: Arc<Mutex<RowBufferPool>>,
+    /// 현재 실행 중인 쿼리의 메모리 예산 추적기 (#265).
+    /// `process_query`에서 DML 실행 시에만 설정되고, 실행 후 clear된다.
+    pub(crate) query_memory_tracker: Arc<RwLock<Option<Arc<QueryMemoryTracker>>>>,
 }
 
 impl DBEngine {
@@ -72,6 +77,7 @@ impl DBEngine {
             statistics_manager: Arc::new(StatisticsManager::new()),
             indices_loaded: Arc::new(tokio::sync::OnceCell::new()),
             row_buffer_pool: Arc::new(Mutex::new(RowBufferPool::default())),
+            query_memory_tracker: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -83,6 +89,13 @@ impl DBEngine {
         _connection_id: String,
     ) -> errors::Result<ExecuteResult> {
         log::debug!("AST echo: {:?}", statement);
+
+        // 쿼리 수준 메모리 예산 설정 (#265). DML(SELECT/UPDATE/DELETE)만 적용합니다.
+        // INSERT는 행을 추가할 뿐 대량 메모리를 모으지 않고, DDL은 스키마 변경이라
+        // 예산 대상이 아닙니다. CREATE INDEX의 backfill은 full_scan을 사용하므로
+        // 예산 적용 대상이 맞지만, DDL 경로에 넣으면 인덱스 생성이 실패할 수 있어
+        // 일단 DML만 적용합니다 (추후 필요 시 확장).
+        let memory_tracker = self.begin_query_memory_tracking(&statement).await;
 
         // 쿼리 실행
         let result = match statement {
@@ -130,9 +143,52 @@ impl DBEngine {
         };
 
         match result {
-            Ok(result) => Ok(result),
-            Err(error) => Err(ExecuteError::wrap(error.to_string())),
+            Ok(result) => {
+                self.end_query_memory_tracking(memory_tracker).await;
+                Ok(result)
+            }
+            Err(error) => {
+                self.end_query_memory_tracking(memory_tracker).await;
+                Err(ExecuteError::wrap(error.to_string()))
+            }
         }
+    }
+
+    /// 쿼리 메모리 예산 추적을 시작합니다 (#265).
+    /// DML(SELECT/UPDATE/DELETE)에만 예산을 설정하고, 나머지는 예산 없이
+    /// 실행합니다.
+    async fn begin_query_memory_tracking(
+        &self,
+        statement: &SQLStatement,
+    ) -> Option<Arc<QueryMemoryTracker>> {
+        let limit_bytes = self.config.max_query_memory_bytes;
+
+        let is_dml_read_heavy = matches!(
+            statement,
+            SQLStatement::DML(DMLStatement::SelectQuery(_))
+                | SQLStatement::DML(DMLStatement::UpdateQuery(_))
+                | SQLStatement::DML(DMLStatement::DeleteQuery(_))
+        );
+
+        if !is_dml_read_heavy || limit_bytes == 0 {
+            return None;
+        }
+
+        let tracker = Arc::new(QueryMemoryTracker::new(limit_bytes));
+        *self.query_memory_tracker.write().await = Some(tracker.clone());
+        Some(tracker)
+    }
+
+    /// 쿼리 메모리 예산 추적을 종료합니다 (#265).
+    /// 예산 초과로 이미 에러가 발생했던 간 무엄 사용하지 않으므로 항상 클리어합니다.
+    async fn end_query_memory_tracking(&self, _tracker: Option<Arc<QueryMemoryTracker>>) {
+        *self.query_memory_tracker.write().await = None;
+    }
+
+    /// 현재 실행 중인 쿼리의 메모리 추적기를 반환합니다.
+    /// 예산 비활성 상태이면 `None`을 반환합니다.
+    pub(crate) async fn query_memory(&self) -> Option<Arc<QueryMemoryTracker>> {
+        self.query_memory_tracker.read().await.clone()
     }
 
     /// Replays WAL entries written but not yet checkpointed before a crash,

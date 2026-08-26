@@ -10,7 +10,7 @@ use crate::engine::ast::dml::plan::select::scan::IndexScanPlan;
 use crate::engine::ast::types::TableName;
 use crate::engine::encoder::schema_encoder::StorageEncoder;
 use crate::engine::row_buffer::{ROW_FRAME_LIVE, RowBufferWrite, encode_live_row_frames};
-use crate::engine::schema::row::TableDataRow;
+use crate::engine::schema::row::{ESTIMATED_FIELD_OVERHEAD, TableDataRow};
 use crate::errors;
 use crate::errors::execute_error::ExecuteError;
 
@@ -59,6 +59,17 @@ impl DBEngine {
                     .read_rows(segment_path, || disk_rows)
             }
         };
+
+        // 메모리 예산 추적 (#265): 전체 세그먼트 로드 후
+        // 자신의 반환 결과(Vec<(RowLocation, TableDataRow)>) 크기를 reserve.
+        if let Some(tracker) = self.query_memory().await {
+            let bytes: u64 = rows
+                .iter()
+                .filter_map(|row| row.as_ref())
+                .map(|row| row.estimated_bytes() + ESTIMATED_FIELD_OVERHEAD)
+                .sum();
+            tracker.reserve(bytes)?;
+        }
 
         let live = rows
             .into_iter()
@@ -307,6 +318,17 @@ impl DBEngine {
         &self,
         segment_path: &Path,
     ) -> errors::Result<Vec<Option<TableDataRow>>> {
+        // 파일 전체를 메모리로 읽기 전에 예산을 미리 확보 (#265).
+        // `tokio::fs::read`가 들어올 파일 크만큼을 추적해
+        // 상한 초과 시 실제 할당 이전에 거부합니다.
+        if let Some(tracker) = self.query_memory().await {
+            let file_size = tokio::fs::metadata(segment_path)
+                .await
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            tracker.reserve(file_size)?;
+        }
+
         let content = match tokio::fs::read(segment_path).await {
             Ok(content) => content,
             Err(error) if error.kind() == IOErrorKind::NotFound => return Ok(Vec::new()),
@@ -596,7 +618,13 @@ impl DBEngine {
             })?;
 
             match all_rows.get(row_index) {
-                Some(Some(row)) => result.push((RowLocation { row_index }, row.clone())),
+                Some(Some(row)) => {
+                    // 메모리 예산 추적 (#265): 결과 행이 앱드될 때마다 크기를 reserve.
+                    if let Some(tracker) = self.query_memory().await {
+                        tracker.reserve(row.estimated_bytes() + ESTIMATED_FIELD_OVERHEAD)?;
+                    }
+                    result.push((RowLocation { row_index }, row.clone()));
+                }
                 Some(None) | None => {
                     return Err(ExecuteError::wrap(format!(
                         "index '{}' is out of sync with table data; drop and recreate the index",
