@@ -321,11 +321,14 @@ impl DBEngine {
         // 파일 전체를 메모리로 읽기 전에 예산을 미리 확보 (#265).
         // `tokio::fs::read`가 들어올 파일 크만큼을 추적해
         // 상한 초과 시 실제 할당 이전에 거부합니다.
+        // `self.file_system.metadata()`를 사용해 주입된 mock으로
+        // metadata 오류와 메모리 예약을 검증할 수 있게 합니다 (CodeRabbit).
         if let Some(tracker) = self.query_memory().await {
-            let file_size = tokio::fs::metadata(segment_path)
-                .await
-                .map(|metadata| metadata.len())
-                .unwrap_or(0);
+            let file_size = match self.file_system.metadata(segment_path).await {
+                Ok(size) => size,
+                Err(error) if error.kind() == IOErrorKind::NotFound => 0,
+                Err(error) => return Err(ExecuteError::wrap(error.to_string())),
+            };
             tracker.reserve(file_size)?;
         }
 
@@ -365,6 +368,13 @@ impl DBEngine {
             if tombstoned {
                 rows.push(None);
             } else {
+                // 역직렬화 전에 프레임 디코드 예산을 추가로 reserve (#265).
+                // 파일 크기는 원본 바이트인데 디코드 결과는 틀이 크게
+                // 날 수 있으므로, 보수적으로 프레임 크기만큼을
+                // 추가 예약하여 상한 초과 시 디코드 전에 거부합니다.
+                if let Some(tracker) = self.query_memory().await {
+                    tracker.reserve(frame_len as u64)?;
+                }
                 let row = encoder
                     .decode::<TableDataRow>(&content[offset..offset + frame_len])
                     .map_err(|error| {

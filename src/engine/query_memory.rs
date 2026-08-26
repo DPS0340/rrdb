@@ -16,10 +16,35 @@
 //! 것이 목적입니다. (PostgreSQL도 work_mem을 "정확한 메모리 측정"이 아닌
 //! "작업 단위별 예산"으로 사용합니다.)
 
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::errors;
 use crate::errors::execute_error::ExecuteError;
+
+/// `tokio::task_local!`에 저장하기 위한 Copy 핸들 (#265).
+///
+/// `tokio::task_local!`은 `Copy` 타입만 지원하므로
+/// `Option<Arc<QueryMemoryTracker>>`를 직접 저장할 수 없습니다.
+/// `NonNull`은 `Copy`이므로 이를 감싸서 저장합니다.
+///
+/// # 안전성
+/// 수명은 task-local scope로 제한됩니다. scope 내부에서
+/// `Arc` 원본(`_keep_alive`)을 보유하므로 핸들이 가리키는 값은
+/// scope 동안 항상 살아 있습니다. `query_memory()`에서
+/// `Arc::increment_strong_count` 후 `Arc::from_raw`로 재구성하므로
+/// refcount 관리가 정확합니다.
+#[derive(Copy, Clone)]
+pub(crate) struct QueryMemoryTrackerRef(pub(crate) Option<NonNull<QueryMemoryTracker>>);
+
+// # Safety
+// - `QueryMemoryTracker`는 `AtomicU64` + `u64`만 가지므로 `Send + Sync`입니다.
+// - 포인터가 가리키는 값은 task-local scope 동안 `_keep_alive`(Arc)가
+//   refcount를 보유하므로, task가 다른 스레드로 이동해도 유효합니다.
+// - task-local은 task 내에서만 접근하므로 포인터가 다른 스레드에서
+//   역참조되는 일은 없습니다 (`query_memory()`는 같은 task에서만 호출).
+unsafe impl Send for QueryMemoryTrackerRef {}
+unsafe impl Sync for QueryMemoryTrackerRef {}
 
 /// 쿼리 메모리 예산 추적기.
 ///

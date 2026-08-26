@@ -642,8 +642,13 @@ mod tests {
         max_query_memory_bytes: u64,
     ) -> (DBEngine, SharedWALManager) {
         let base_path = PathBuf::from("target").join(test_name);
-        if base_path.exists() {
-            tokio::fs::remove_dir_all(&base_path).await.unwrap();
+        // 동기 `Path::exists()`는 metadata 오류를 `false`로 처리해 정리를 건너뛸 수
+        // 있으므로, 비동기 `tokio::fs::metadata`로 NotFound만 무시하고 다른 오류는
+        // 테스트를 실패시킵니다 (CodeRabbit).
+        match tokio::fs::metadata(&base_path).await {
+            Ok(_) => tokio::fs::remove_dir_all(&base_path).await.unwrap(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("metadata check failed for {base_path:?}: {error}"),
         }
 
         let mut config = LaunchConfig::default_for_base_path(&base_path);
@@ -970,5 +975,83 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.rows.len(), 1);
+    }
+
+    /// 지정한 테이블에 큰 문자열 행을 삽입합니다.
+    async fn insert_big_string_into(
+        engine: &DBEngine,
+        wal: SharedWALManager,
+        table: &str,
+        size_bytes: usize,
+    ) {
+        let value = "x".repeat(size_bytes);
+        engine
+            .insert(
+                InsertQuery::builder()
+                    .set_into_table(TableName::new(Some("rrdb".to_string()), table.to_string()))
+                    .set_columns(vec!["id".to_string()])
+                    .set_values(vec![InsertValue {
+                        list: vec![Some(SQLExpression::String(value))],
+                    }])
+                    .build(),
+                wal,
+            )
+            .await
+            .unwrap();
+    }
+
+    /// 동시에 실행되는 두 쿼리는 서로의 메모리 예산을 방해하지 않아야 합니다 (#265).
+    ///
+    /// CodeRabbit #1: 이전 구현(공유 RwLock 슬롯)은 두 `process_query`가 동시에
+    /// 실행되면 한쪽이 다른 쪽의 tracker를 덮어쓰거나, 한쪽이 스캔을 마치기 전에
+    /// 슬롯을 클리어해서 나머지가 예산 없이 실행될 수 있었습니다.
+    ///
+    /// task-local로 전환한 후에는 각 쿼리가 자기 tracker를 가지므로,
+    /// 큰 쿼리(예산 초과 → 에러)와 작은 쿼리(예산 내 → 성공)를 동시에 실행해도
+    /// 서로의 결과에 영향을 주지 않아야 합니다.
+    #[tokio::test]
+    async fn concurrent_queries_do_not_interfere_with_each_others_budget() {
+        let (engine, wal) =
+            build_test_engine_with_memory_limit("test_select_oom_concurrent", 2048).await;
+
+        execute_sql(&engine, wal.clone(), "create database rrdb;")
+            .await
+            .unwrap();
+        execute_sql(
+            &engine,
+            wal.clone(),
+            "create table small_t (id varchar(65536));",
+        )
+        .await
+        .unwrap();
+        execute_sql(
+            &engine,
+            wal.clone(),
+            "create table big_t (id varchar(65536));",
+        )
+        .await
+        .unwrap();
+
+        // small_t: 예산(2KB) 안에 들어오는 작은 값
+        // big_t: 예산을 넘기는 큰 값 (4KB 문자열)
+        insert_big_string_into(&engine, wal.clone(), "small_t", 256).await;
+        insert_big_string_into(&engine, wal.clone(), "big_t", 4096).await;
+
+        // 동시 실행: big 쿼리는 실패, small 쿼리는 성공해야 함
+        let (big_result, small_result) = tokio::join!(
+            execute_sql(&engine, wal.clone(), "select id from big_t;"),
+            execute_sql(&engine, wal.clone(), "select id from small_t;"),
+        );
+
+        let big_error = big_result.unwrap_err();
+        assert!(
+            big_error
+                .to_string()
+                .contains("query memory limit exceeded"),
+            "big query should be killed, got: {big_error}"
+        );
+
+        let small_rows = small_result.unwrap();
+        assert_eq!(small_rows.rows.len(), 1, "small query should still succeed");
     }
 }

@@ -236,7 +236,6 @@ mod tests {
             statistics_manager: Arc::new(StatisticsManager::new()),
             indices_loaded: Arc::new(OnceCell::new()),
             row_buffer_pool: Arc::new(Mutex::new(RowBufferPool::default())),
-            query_memory_tracker: Arc::new(RwLock::new(None)),
         }
     }
 

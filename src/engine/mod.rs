@@ -19,6 +19,7 @@ pub mod types;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::common::command::{CommandRunner, RealCommandRunner};
@@ -34,7 +35,7 @@ use crate::engine::ast::{DDLStatement, DMLStatement, OtherStatement, SQLStatemen
 use crate::engine::encoder::schema_encoder::StorageEncoder;
 use crate::engine::index::manager::IndexManager;
 use crate::engine::optimizer::statistics::StatisticsManager;
-use crate::engine::query_memory::QueryMemoryTracker;
+use crate::engine::query_memory::{QueryMemoryTracker, QueryMemoryTrackerRef};
 use crate::engine::row_buffer::RowBufferPool;
 use crate::engine::schema::table::TableSchema;
 use crate::engine::types::ExecuteResult;
@@ -44,6 +45,24 @@ use crate::engine::wal::types::{EntryType, InsertWALPayload, WALEntry};
 use crate::errors;
 use crate::errors::execute_error::ExecuteError;
 use tokio::sync::{Mutex, RwLock};
+
+/// 쿼리 수준 메모리 예산 추적기 (#265).
+///
+/// 서버는 연결마다 task를 spawn하므로, 동시에 여러
+/// `process_query`가 실행될 수 있습니다. 공유된 슬롯(RwLock<Option<..>>)에
+/// 저장하면 서로의 tracker를 덮어쓰거나 클리어하는 race가
+/// 발생합니다. 특히 한 쿼리가 스캔을 마치기 전에 다른
+/// 쿼리가 슬롯을 클리어하면 후자는 예산 없이 실행됩니다.
+///
+/// 해결: `tokio::task_local!`로 task 범위에 저장합니다.
+/// (`tokio::task_local!`은 `Copy` 타입만 지원하므로
+/// `QueryMemoryTrackerRef`(NonNull 래퍼)를 저장합니다.)
+/// - task 마다 각자의 tracker를 가짐 → 동시 쿼리 간 race 없음
+/// - task 종료 시 자동 정리 → cleanup race 없음
+/// - 시그니처 변경 없이 내부 코드에서 `query_memory()` 호출 가능
+tokio::task_local! {
+    static QUERY_MEMORY_TRACKER: QueryMemoryTrackerRef;
+}
 
 pub type SharedWALManager = Arc<Mutex<WALManager<BincodeEncoder>>>;
 
@@ -58,9 +77,6 @@ pub struct DBEngine {
     /// 디스크의 인덱스 파일을 메모리로 적재했는지 여부 (최초 사용 시 1회 적재)
     pub(crate) indices_loaded: Arc<tokio::sync::OnceCell<()>>,
     pub(crate) row_buffer_pool: Arc<Mutex<RowBufferPool>>,
-    /// 현재 실행 중인 쿼리의 메모리 예산 추적기 (#265).
-    /// `process_query`에서 DML 실행 시에만 설정되고, 실행 후 clear된다.
-    pub(crate) query_memory_tracker: Arc<RwLock<Option<Arc<QueryMemoryTracker>>>>,
 }
 
 impl DBEngine {
@@ -77,7 +93,6 @@ impl DBEngine {
             statistics_manager: Arc::new(StatisticsManager::new()),
             indices_loaded: Arc::new(tokio::sync::OnceCell::new()),
             row_buffer_pool: Arc::new(Mutex::new(RowBufferPool::default())),
-            query_memory_tracker: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -95,9 +110,36 @@ impl DBEngine {
         // 예산 대상이 아닙니다. CREATE INDEX의 backfill은 full_scan을 사용하므로
         // 예산 적용 대상이 맞지만, DDL 경로에 넣으면 인덱스 생성이 실패할 수 있어
         // 일단 DML만 적용합니다 (추후 필요 시 확장).
-        let memory_tracker = self.begin_query_memory_tracking(&statement).await;
+        //
+        // 공유 슬롯이 아닌 task-local로 전달하므로, 동시 실행되는 여러 쿼리가
+        // 서로의 tracker를 덮어쓰거나 클리어하는 race가 없습니다 (CodeRabbit #1).
+        let tracker =
+            Self::query_memory_tracker_for(&statement, self.config.max_query_memory_bytes);
+        // Copy 핸들: scope 동안 `tracker`(Arc)를 클로저에 move하여 값이 살아있게 보장.
+        let tracker_ref =
+            QueryMemoryTrackerRef(tracker.as_ref().map(|arc| NonNull::from(arc.as_ref())));
 
-        // 쿼리 실행
+        // 쿼리 실행 (task 범위로 tracker 설정; scope 종료 시 자동 정리)
+        QUERY_MEMORY_TRACKER
+            .scope(tracker_ref, async move {
+                // tracker(Arc)를 scope 동안 유지 — tracker_ref가 가리키는 값의 수명 보장
+                let _keep_alive = tracker;
+                let result = self.execute_statement(statement, wal_manager).await;
+                match result {
+                    Ok(result) => Ok(result),
+                    Err(error) => Err(ExecuteError::wrap(error.to_string())),
+                }
+            })
+            .await
+    }
+
+    /// 스테이트먼트를 실행합니다. `process_query`가
+    /// 메모리 예산 task-local을 설정한 후 호출합니다.
+    async fn execute_statement(
+        &self,
+        statement: SQLStatement,
+        wal_manager: SharedWALManager,
+    ) -> errors::Result<ExecuteResult> {
         let result = match statement {
             SQLStatement::DDL(DDLStatement::CreateDatabaseQuery(query)) => {
                 self.create_database(query).await
@@ -142,27 +184,16 @@ impl DBEngine {
             _ => unimplemented!("no execute implementation"),
         };
 
-        match result {
-            Ok(result) => {
-                self.end_query_memory_tracking(memory_tracker).await;
-                Ok(result)
-            }
-            Err(error) => {
-                self.end_query_memory_tracking(memory_tracker).await;
-                Err(ExecuteError::wrap(error.to_string()))
-            }
-        }
+        result
     }
 
-    /// 쿼리 메모리 예산 추적을 시작합니다 (#265).
-    /// DML(SELECT/UPDATE/DELETE)에만 예산을 설정하고, 나머지는 예산 없이
-    /// 실행합니다.
-    async fn begin_query_memory_tracking(
-        &self,
+    /// 쿼리 메모리 예산 추적기를 생성합니다 (#265).
+    /// DML(SELECT/UPDATE/DELETE)에만 예산을 설정하고, 나머지는 `None`을
+    /// 반환하여 예산 없이 실행합니다.
+    fn query_memory_tracker_for(
         statement: &SQLStatement,
+        limit_bytes: u64,
     ) -> Option<Arc<QueryMemoryTracker>> {
-        let limit_bytes = self.config.max_query_memory_bytes;
-
         let is_dml_read_heavy = matches!(
             statement,
             SQLStatement::DML(DMLStatement::SelectQuery(_))
@@ -174,21 +205,35 @@ impl DBEngine {
             return None;
         }
 
-        let tracker = Arc::new(QueryMemoryTracker::new(limit_bytes));
-        *self.query_memory_tracker.write().await = Some(tracker.clone());
-        Some(tracker)
-    }
-
-    /// 쿼리 메모리 예산 추적을 종료합니다 (#265).
-    /// 예산 초과로 이미 에러가 발생했던 간 무엄 사용하지 않으므로 항상 클리어합니다.
-    async fn end_query_memory_tracking(&self, _tracker: Option<Arc<QueryMemoryTracker>>) {
-        *self.query_memory_tracker.write().await = None;
+        Some(Arc::new(QueryMemoryTracker::new(limit_bytes)))
     }
 
     /// 현재 실행 중인 쿼리의 메모리 추적기를 반환합니다.
     /// 예산 비활성 상태이면 `None`을 반환합니다.
     pub(crate) async fn query_memory(&self) -> Option<Arc<QueryMemoryTracker>> {
-        self.query_memory_tracker.read().await.clone()
+        // `try_with`를 사용해 task-local이 설정되지 않은 컨텍스트(테스트에서
+        // `process_query`를 거치지 않고 full_scan 등을 직접 호출)에서도
+        // panic 대신 `None`을 반환합니다.
+        QUERY_MEMORY_TRACKER
+            .try_with(|tracker_ref| match tracker_ref.0 {
+                Some(ptr) => {
+                    // 안전성: scope 동안 원본 Arc(`_keep_alive`)가 살아 있으므로
+                    // 포인터는 항상 유효. refcount를 +1 하고 from_raw로
+                    // 재구성하여 반환되는 Arc의 수명을 보장합니다.
+                    //
+                    // # Safety
+                    // - `ptr`은 `NonNull::from(arc.as_ref())`로 만들어졌으므로 항상
+                    //   유효한 `QueryMemoryTracker`를 가리킵니다.
+                    // - scope 동안 `_keep_alive`가 refcount를 보유하므로
+                    //   `increment_strong_count` 시점에 사용 후방된 메모리가 아닙니다.
+                    unsafe {
+                        std::sync::Arc::increment_strong_count(ptr.as_ptr());
+                        Some(std::sync::Arc::from_raw(ptr.as_ptr()))
+                    }
+                }
+                None => None,
+            })
+            .unwrap_or(None)
     }
 
     /// Replays WAL entries written but not yet checkpointed before a crash,
