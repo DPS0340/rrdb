@@ -110,6 +110,20 @@ impl<'a> WALBuilder<'a> {
                 // before it, following the PostgreSQL/SQLite recovery
                 // convention.
                 log::warn!("discarding torn WAL tail in {:?}: {}", path, reason);
+
+                // Truncate the torn tail on disk. Otherwise the stale bytes
+                // would survive a checkpoint and, once this segment rotates
+                // into an intermediate one, the next restart would treat
+                // them as intermediate corruption and fail to start.
+                self.file_system
+                    .truncate(&path, used_bytes as u64)
+                    .await
+                    .map_err(|e| {
+                        WALError::wrap(format!(
+                            "failed to truncate torn WAL tail in {:?}: {}",
+                            path, e
+                        ))
+                    })?;
             }
 
             let entries: Vec<WALEntry> = decoder.decode(&content[..used_bytes]).map_err(|e| {

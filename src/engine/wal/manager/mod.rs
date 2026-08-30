@@ -126,12 +126,13 @@ where
         // memcpy, the on-disk frame either has len == 0 (unwritten) or a
         // truncated body under a valid len — both are discarded on recovery.
         let header_offset = self.current_offset;
-        let header = &frame[..size_of::<u32>()];
-        // Reserve the header slot first (as zeros = "not committed"), then
-        // write the body, then patch the header last (see #268).
-        self.append_frame_to_mmap(header).await?;
+        // Reserve the header slot as zeros first: an unwritten slot can never
+        // be mistaken for a committed frame. Then write the body, and patch
+        // the real length header last (see #268).
+        self.append_frame_to_mmap(&[0u8; size_of::<u32>()]).await?;
         let body = &frame[size_of::<u32>()..];
         self.append_frame_to_mmap(body).await?;
+        let header = &frame[..size_of::<u32>()];
         self.patch_frame_header_at(header_offset, header).await?;
 
         self.unsynced_bytes += frame.len();
@@ -732,6 +733,47 @@ mod tests {
             .map(|entry| entry.data.clone().unwrap())
             .collect();
         assert_eq!(payloads, vec![b"complete".to_vec()]);
+    }
+
+    /// #268: after discarding a torn tail the file itself must be truncated,
+    /// so the segment stays clean even after it later becomes an intermediate
+    /// segment (rotation) — otherwise the next restart would fail.
+    #[tokio::test]
+    async fn test_build_truncates_torn_tail_from_disk() {
+        let wal_dir = setup_test_wal_dir("truncate_torn_tail").await;
+        let config = get_test_config(&wal_dir);
+        write_wal_file(
+            &config,
+            1,
+            &vec![create_entry(EntryType::Insert, Some("complete"))],
+        )
+        .await;
+
+        let path = wal_dir.join(format!("00000001.{}", config.wal_extension));
+        let intact_len = tokio::fs::metadata(&path).await.unwrap().len();
+        {
+            let mut file = tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .await
+                .unwrap();
+            file.write_all(&8u32.to_le_bytes()).await.unwrap();
+            file.write_all(&[1, 2, 3]).await.unwrap();
+        }
+        assert!(tokio::fs::metadata(&path).await.unwrap().len() > intact_len);
+
+        let wal_manager = WALBuilder::new(&config)
+            .build(BincodeDecoder::new(), BincodeEncoder::new())
+            .await
+            .expect("a torn tail must not prevent startup");
+        assert_eq!(wal_manager.pending_entries().len(), 1);
+
+        // The torn bytes must be gone from the file itself.
+        assert_eq!(
+            tokio::fs::metadata(&path).await.unwrap().len(),
+            intact_len,
+            "the torn tail must be truncated from disk, not just ignored"
+        );
     }
 
     #[tokio::test]
