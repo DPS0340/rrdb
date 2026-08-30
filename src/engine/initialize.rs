@@ -262,6 +262,7 @@ wal_enabled = true
 wal_directory = "/var/lib/rrdb/wal"
 wal_segment_size = 16777216
 wal_extension = "log"
+max_query_memory_bytes = 134217728
 "##;
 
         struct TestCase {

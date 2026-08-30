@@ -10,7 +10,7 @@ use crate::engine::ast::dml::plan::select::scan::IndexScanPlan;
 use crate::engine::ast::types::TableName;
 use crate::engine::encoder::schema_encoder::StorageEncoder;
 use crate::engine::row_buffer::{ROW_FRAME_LIVE, RowBufferWrite, encode_live_row_frames};
-use crate::engine::schema::row::TableDataRow;
+use crate::engine::schema::row::{ESTIMATED_FIELD_OVERHEAD, TableDataRow};
 use crate::errors;
 use crate::errors::execute_error::ExecuteError;
 
@@ -59,6 +59,17 @@ impl DBEngine {
                     .read_rows(segment_path, || disk_rows)
             }
         };
+
+        // 메모리 예산 추적 (#265): 전체 세그먼트 로드 후
+        // 자신의 반환 결과(Vec<(RowLocation, TableDataRow)>) 크기를 reserve.
+        if let Some(tracker) = self.query_memory().await {
+            let bytes: u64 = rows
+                .iter()
+                .filter_map(|row| row.as_ref())
+                .map(|row| row.estimated_bytes() + ESTIMATED_FIELD_OVERHEAD)
+                .sum();
+            tracker.reserve(bytes)?;
+        }
 
         let live = rows
             .into_iter()
@@ -307,6 +318,20 @@ impl DBEngine {
         &self,
         segment_path: &Path,
     ) -> errors::Result<Vec<Option<TableDataRow>>> {
+        // 파일 전체를 메모리로 읽기 전에 예산을 미리 확보 (#265).
+        // `tokio::fs::read`가 들어올 파일 크만큼을 추적해
+        // 상한 초과 시 실제 할당 이전에 거부합니다.
+        // `self.file_system.metadata()`를 사용해 주입된 mock으로
+        // metadata 오류와 메모리 예약을 검증할 수 있게 합니다 (CodeRabbit).
+        if let Some(tracker) = self.query_memory().await {
+            let file_size = match self.file_system.metadata(segment_path).await {
+                Ok(size) => size,
+                Err(error) if error.kind() == IOErrorKind::NotFound => 0,
+                Err(error) => return Err(ExecuteError::wrap(error.to_string())),
+            };
+            tracker.reserve(file_size)?;
+        }
+
         let content = match tokio::fs::read(segment_path).await {
             Ok(content) => content,
             Err(error) if error.kind() == IOErrorKind::NotFound => return Ok(Vec::new()),
@@ -343,6 +368,13 @@ impl DBEngine {
             if tombstoned {
                 rows.push(None);
             } else {
+                // 역직렬화 전에 프레임 디코드 예산을 추가로 reserve (#265).
+                // 파일 크기는 원본 바이트인데 디코드 결과는 틀이 크게
+                // 날 수 있으므로, 보수적으로 프레임 크기만큼을
+                // 추가 예약하여 상한 초과 시 디코드 전에 거부합니다.
+                if let Some(tracker) = self.query_memory().await {
+                    tracker.reserve(frame_len as u64)?;
+                }
                 let row = encoder
                     .decode::<TableDataRow>(&content[offset..offset + frame_len])
                     .map_err(|error| {
@@ -596,7 +628,13 @@ impl DBEngine {
             })?;
 
             match all_rows.get(row_index) {
-                Some(Some(row)) => result.push((RowLocation { row_index }, row.clone())),
+                Some(Some(row)) => {
+                    // 메모리 예산 추적 (#265): 결과 행이 앱드될 때마다 크기를 reserve.
+                    if let Some(tracker) = self.query_memory().await {
+                        tracker.reserve(row.estimated_bytes() + ESTIMATED_FIELD_OVERHEAD)?;
+                    }
+                    result.push((RowLocation { row_index }, row.clone()));
+                }
                 Some(None) | None => {
                     return Err(ExecuteError::wrap(format!(
                         "index '{}' is out of sync with table data; drop and recreate the index",

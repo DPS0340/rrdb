@@ -14,6 +14,9 @@ pub trait FileSystem {
     async fn write_file(&self, path: &str, content: &[u8]) -> io::Result<()>;
     async fn read_dir(&self, path: &str) -> io::Result<Vec<FileSystemEntry>>;
     async fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
+    /// 파일의 크기(bytes)를 반환합니다. (#265)
+    /// `read_segment_rows`가 파일 전체를 메모리로 읽기 전에 예산을 확보하는 데 사용합니다.
+    async fn metadata(&self, path: &Path) -> io::Result<u64>;
 }
 
 pub struct RealFileSystem;
@@ -44,5 +47,10 @@ impl FileSystem for RealFileSystem {
 
     async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         tokio::fs::read(path).await
+    }
+
+    async fn metadata(&self, path: &Path) -> io::Result<u64> {
+        let metadata = tokio::fs::metadata(path).await?;
+        Ok(metadata.len())
     }
 }
