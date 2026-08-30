@@ -1,0 +1,100 @@
+name: Rocq Formal Verification
+
+on:
+  pull_request:
+    paths:
+      - "src/**/*.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rocq_compile_all.sh"
+      - "rocq.mk"
+      - ".github/workflows/rocq.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+  ROCQ_OF_RUST_DIR: ${{ github.workspace }}/../rocq-of-rust
+
+jobs:
+  rocq:
+    name: Translate & Type-check Rocq
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust nightly toolchain (with rustc-dev)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2025-12-07
+          components: rustc-dev
+
+      - name: Cache Cargo directories
+        uses: actions/cache@v4
+        with:
+          save-always: true
+          key: ${{ runner.os }}-cargo-rocq-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-rocq-
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ./target
+
+      - name: Cache opam directories
+        uses: actions/cache@v4
+        with:
+          save-always: true
+          key: ${{ runner.os }}-opam-rocq-of-rust-v1
+          restore-keys: |
+            ${{ runner.os }}-opam-rocq-of-rust-
+          path: |
+            ~/.opam/
+            /home/runner/.opam/
+
+      - name: Install opam
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y opam
+
+      - name: Set up opam switch with Rocq
+        run: |
+          opam init -a --disable-sandboxing -y
+          opam switch create rocq-of-rust ocaml.5.1.0
+          eval $(opam env --switch=rocq-of-rust)
+          opam repo add rocq-released https://rocq-prover.org/opam/released || true
+          opam install -y dune zarith ocamlfind
+
+      - name: Clone rocq-of-rust
+        run: |
+          git clone --depth 1 https://github.com/formal-land/rocq-of-rust.git "$ROCQ_OF_RUST_DIR"
+          cd "$ROCQ_OF_RUST_DIR"
+          cargo +nightly-2025-12-07 install --path lib/
+
+      - name: Build RocqOfRust base library
+        run: |
+          eval $(opam env --switch=rocq-of-rust)
+          cd "$ROCQ_OF_RUST_DIR/RocqOfRust"
+          opam install --deps-only . -y
+          make -j2
+
+      - name: Transpile Rust crate to Rocq
+        run: |
+          eval $(opam env --switch=rocq-of-rust)
+          cargo +nightly-2025-12-07 rocq-of-rust --axiomatize
+
+      - name: Compile translated Rocq files
+        run: |
+          eval $(opam env --switch=rocq-of-rust)
+          ./rocq_compile_all.sh
+
+      - name: Upload Rocq logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rocq-logs
+          path: rocq_logs/
+          if-no-files-found: ignore

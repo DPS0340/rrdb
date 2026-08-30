@@ -1,0 +1,2 @@
+-R /Users/lee/programming/rocq-of-rust/RocqOfRust RocqOfRust
+-arg -impredicative-set

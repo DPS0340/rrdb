@@ -4,3 +4,6 @@ dev:
 buildx-deploy:
 	@docker buildx build --platform linux/amd64,linux/arm64 -t myyrakle/rrdb:$(VERSION) --push  .
 
+# rocq-of-rust formal verification (see rocq.mk for prerequisites)
+include rocq.mk
+
