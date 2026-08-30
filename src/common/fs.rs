@@ -14,6 +14,9 @@ pub trait FileSystem {
     async fn write_file(&self, path: &str, content: &[u8]) -> io::Result<()>;
     async fn read_dir(&self, path: &str) -> io::Result<Vec<FileSystemEntry>>;
     async fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
+    /// 파일을 지정한 크기로 자릅니다. (#268)
+    /// WAL 복구 시 newest segment의 torn tail을 제거하는 데 사용합니다.
+    async fn truncate(&self, path: &Path, size: u64) -> io::Result<()>;
     /// 파일의 크기(bytes)를 반환합니다. (#265)
     /// `read_segment_rows`가 파일 전체를 메모리로 읽기 전에 예산을 확보하는 데 사용합니다.
     async fn metadata(&self, path: &Path) -> io::Result<u64>;
@@ -47,6 +50,11 @@ impl FileSystem for RealFileSystem {
 
     async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         tokio::fs::read(path).await
+    }
+
+    async fn truncate(&self, path: &Path, size: u64) -> io::Result<()> {
+        let file = tokio::fs::OpenOptions::new().write(true).open(path).await?;
+        file.set_len(size).await
     }
 
     async fn metadata(&self, path: &Path) -> io::Result<u64> {
