@@ -17,11 +17,13 @@ fn try_parse(sql: &str) -> crate::errors::Result<Vec<crate::engine::ast::SQLStat
     Parser::new(tokens).parse(ParserContext::default())
 }
 
-/// Arbitrary text, including control characters, quotes and unbalanced
-/// delimiters.
+/// Truly arbitrary text: `proptest::char::any()` covers control characters
+/// (NUL, lone `\r`), quotes and unbalanced delimiters that the previous
+/// ASCII-only regex silently skipped. Every character is adversarial on
+/// purpose -- the invariant under test is that none of them can make the
+/// tokenizer or parser panic.
 fn arbitrary_sql_text() -> impl Strategy<Value = String> {
-    proptest::string::string_regex(r#"[a-zA-Z0-9_ ,;'"()\-*=<>\.\r\n\t]{0,80}"#)
-        .expect("valid regex")
+    proptest::collection::vec(proptest::char::any(), 0..80).prop_map(String::from_iter)
 }
 
 /// Fragments drawn from real SQL keywords, so the generator spends more of its
@@ -95,20 +97,21 @@ fn valid_statement() -> impl Strategy<Value = String> {
     let literal = prop::sample::select(vec!["1", "42", "'x'"]);
     let terminator = prop::sample::select(vec!["", ";"]);
 
-    (table, column, literal, terminator).prop_flat_map(
-        |(table, column, literal, terminator)| {
-            let shapes = vec![
-                format!("SELECT {} FROM {}", column, table),
-                format!("SELECT * FROM {}", table),
-                format!("SELECT {} FROM {} WHERE {} = {}", column, table, column, literal),
-                format!("INSERT INTO {} ({}) VALUES ({})", table, column, literal),
-                format!("UPDATE {} SET {} = {}", table, column, literal),
-                format!("DELETE FROM {} WHERE {} = {}", table, column, literal),
-                format!("DROP TABLE {}", table),
-            ];
-            prop::sample::select(shapes).prop_map(move |shape| format!("{}{}", shape, terminator))
-        },
-    )
+    (table, column, literal, terminator).prop_flat_map(|(table, column, literal, terminator)| {
+        let shapes = vec![
+            format!("SELECT {} FROM {}", column, table),
+            format!("SELECT * FROM {}", table),
+            format!(
+                "SELECT {} FROM {} WHERE {} = {}",
+                column, table, column, literal
+            ),
+            format!("INSERT INTO {} ({}) VALUES ({})", table, column, literal),
+            format!("UPDATE {} SET {} = {}", table, column, literal),
+            format!("DELETE FROM {} WHERE {} = {}", table, column, literal),
+            format!("DROP TABLE {}", table),
+        ];
+        prop::sample::select(shapes).prop_map(move |shape| format!("{}{}", shape, terminator))
+    })
 }
 
 proptest! {
@@ -144,7 +147,28 @@ proptest! {
     /// the fragment version because this one exercises the statement bodies.
     #[test]
     fn parsing_a_mutated_statement_is_deterministic(sql in mutated_statement()) {
-        prop_assert_eq!(try_parse(&sql).is_ok(), try_parse(&sql).is_ok());
+        let first = try_parse(&sql);
+        let second = try_parse(&sql);
+
+        match (first, second) {
+            (Ok(first), Ok(second)) => {
+                prop_assert_eq!(format!("{:?}", first), format!("{:?}", second));
+            }
+            (Err(first), Err(second)) => {
+                // An Err/Err outcome is only deterministic if it is the same
+                // error, not just any error.
+                prop_assert_eq!(first.kind, second.kind);
+            }
+            (first, second) => {
+                prop_assert!(
+                    false,
+                    "nondeterministic parse of {:?}: {:?} vs {:?}",
+                    sql,
+                    first.map(|_| ()),
+                    second.map(|_| ())
+                );
+            }
+        }
     }
 
     /// Parsing is a pure function of its input: the same text must always
@@ -155,10 +179,22 @@ proptest! {
         let first = try_parse(&sql);
         let second = try_parse(&sql);
 
-        prop_assert_eq!(first.is_ok(), second.is_ok());
-
-        if let (Ok(first), Ok(second)) = (first, second) {
-            prop_assert_eq!(format!("{:?}", first), format!("{:?}", second));
+        match (first, second) {
+            (Ok(first), Ok(second)) => {
+                prop_assert_eq!(format!("{:?}", first), format!("{:?}", second));
+            }
+            (Err(first), Err(second)) => {
+                prop_assert_eq!(first.kind, second.kind);
+            }
+            (first, second) => {
+                prop_assert!(
+                    false,
+                    "nondeterministic parse of {:?}: {:?} vs {:?}",
+                    sql,
+                    first.map(|_| ()),
+                    second.map(|_| ())
+                );
+            }
         }
     }
 
@@ -168,10 +204,22 @@ proptest! {
         let bare = try_parse(&sql);
         let padded = try_parse(&format!("  \t{sql}\n "));
 
-        prop_assert_eq!(bare.is_ok(), padded.is_ok());
-
-        if let (Ok(bare), Ok(padded)) = (bare, padded) {
-            prop_assert_eq!(format!("{:?}", bare), format!("{:?}", padded));
+        match (bare, padded) {
+            (Ok(bare), Ok(padded)) => {
+                prop_assert_eq!(format!("{:?}", bare), format!("{:?}", padded));
+            }
+            (Err(bare), Err(padded)) => {
+                prop_assert_eq!(bare.kind, padded.kind);
+            }
+            (bare, padded) => {
+                prop_assert!(
+                    false,
+                    "whitespace changed the parse result of {:?}: {:?} vs {:?}",
+                    sql,
+                    bare.map(|_| ()),
+                    padded.map(|_| ())
+                );
+            }
         }
     }
 
@@ -222,5 +270,3 @@ proptest! {
         prop_assert!(parsed.unwrap().is_empty());
     }
 }
-
-
