@@ -93,10 +93,26 @@ impl<'a> WALBuilder<'a> {
             let content = self.file_system.read(&path).await.map_err(|e| {
                 WALError::wrap(format!("failed to read log file {:?}: {}", path, e))
             })?;
-            let used_bytes = used_wal_bytes(&content).map_err(|e| {
+            let (used_bytes, torn) = used_wal_bytes(&content).map_err(|e| {
                 WALError::wrap(format!("failed to inspect log file {:?}: {}", path, e))
             })?;
-            let entries: Vec<WALEntry> = decoder.decode(&content).map_err(|e| {
+
+            if let Some(reason) = torn {
+                if sequence != max_sequence {
+                    return Err(WALError::wrap(format!(
+                        "corrupt intermediate segment {:?}: {}",
+                        path, reason
+                    )));
+                }
+                // #268: a torn write (partial header or truncated frame body)
+                // in the newest segment is an uncommitted record, not file
+                // corruption. Discard it and recover only the complete frames
+                // before it, following the PostgreSQL/SQLite recovery
+                // convention.
+                log::warn!("discarding torn WAL tail in {:?}: {}", path, reason);
+            }
+
+            let entries: Vec<WALEntry> = decoder.decode(&content[..used_bytes]).map_err(|e| {
                 WALError::wrap(format!("failed to decode log file {:?}: {}", path, e))
             })?;
 
@@ -124,16 +140,25 @@ impl<'a> WALBuilder<'a> {
     }
 }
 
-fn used_wal_bytes(content: &[u8]) -> errors::Result<usize> {
+/// Walks the frames of a WAL segment and returns the byte offset of the last
+/// complete frame boundary, along with the reason the tail after it is torn
+/// (`None` when the segment ends on a clean frame boundary or zero padding).
+///
+/// #268: a torn write leaves a frame whose length header is valid but whose
+/// body never fully landed (or a header that was only partially written).
+/// That is an *uncommitted* record, not corruption, so the truncation is
+/// reported instead of being an error; the caller decides whether discarding
+/// the tail is acceptable (newest segment) or not (intermediate segment).
+fn used_wal_bytes(content: &[u8]) -> errors::Result<(usize, Option<String>)> {
     let mut offset = 0;
 
     while offset < content.len() {
         if content.len() - offset < size_of::<u32>() {
             if content[offset..].iter().all(|byte| *byte == 0) {
-                return Ok(offset);
+                return Ok((offset, None));
             }
 
-            return Err(WALError::wrap("truncated wal frame header".to_string()));
+            return Ok((offset, Some("truncated wal frame header".to_string())));
         }
 
         let frame_len = u32::from_le_bytes(
@@ -143,17 +168,20 @@ fn used_wal_bytes(content: &[u8]) -> errors::Result<usize> {
         ) as usize;
 
         if frame_len == 0 {
-            return Ok(offset);
+            return Ok((offset, None));
         }
 
         offset += size_of::<u32>();
 
         if content.len() - offset < frame_len {
-            return Err(WALError::wrap("truncated wal frame body".to_string()));
+            return Ok((
+                offset - size_of::<u32>(),
+                Some("truncated wal frame body".to_string()),
+            ));
         }
 
         offset += frame_len;
     }
 
-    Ok(offset)
+    Ok((offset, None))
 }

@@ -120,7 +120,19 @@ where
         frame[..size_of::<u32>()].copy_from_slice(&frame_len.to_le_bytes());
 
         self.rotate_if_needed(frame.len()).await?;
-        self.append_frame_to_mmap(&frame).await?;
+
+        // #268: write the body first and patch the length header last. The
+        // length then acts as a commit marker: if a crash interrupts the
+        // memcpy, the on-disk frame either has len == 0 (unwritten) or a
+        // truncated body under a valid len — both are discarded on recovery.
+        let header_offset = self.current_offset;
+        let header = &frame[..size_of::<u32>()];
+        // Reserve the header slot first (as zeros = "not committed"), then
+        // write the body, then patch the header last (see #268).
+        self.append_frame_to_mmap(header).await?;
+        let body = &frame[size_of::<u32>()..];
+        self.append_frame_to_mmap(body).await?;
+        self.patch_frame_header_at(header_offset, header).await?;
 
         self.unsynced_bytes += frame.len();
         if self.unsynced_bytes >= GROUP_COMMIT_THRESHOLD_BYTES {
@@ -174,6 +186,33 @@ where
         segment.mmap[segment.offset..end_offset].copy_from_slice(frame);
         segment.offset = end_offset;
         self.current_offset = end_offset;
+
+        Ok(())
+    }
+
+    /// Overwrites the length header of the frame just written, at the
+    /// absolute offset its slot occupies. Used by `write_entry` to patch the
+    /// 4-byte length header *after* the body (see #268).
+    async fn patch_frame_header_at(
+        &mut self,
+        header_offset: usize,
+        header: &[u8],
+    ) -> errors::Result<()> {
+        self.open_current_segment_if_needed().await?;
+
+        let segment = self
+            .current_segment
+            .as_mut()
+            .ok_or_else(|| WALError::wrap("wal segment is not open".to_string()))?;
+
+        // The slot was reserved by the body write; patching it must not move
+        // the segment offset.
+        debug_assert!(
+            header_offset + header.len() <= segment.offset,
+            "header slot must lie within the already-written frame"
+        );
+
+        segment.mmap[header_offset..header_offset + header.len()].copy_from_slice(header);
 
         Ok(())
     }
@@ -612,6 +651,89 @@ mod tests {
         );
     }
 
+    /// #268: a torn write (valid frame_len, truncated body) at the end of the
+    /// newest segment is an *uncommitted* record, not corruption — it must be
+    /// discarded and recovery must proceed with the complete entries before
+    /// it, instead of failing startup.
+    #[tokio::test]
+    async fn test_build_discards_torn_tail_of_newest_segment() {
+        let wal_dir = setup_test_wal_dir("torn_tail_newest_segment").await;
+        let config = get_test_config(&wal_dir);
+        write_wal_file(
+            &config,
+            1,
+            &vec![
+                create_entry(EntryType::Insert, Some("complete-1")),
+                create_entry(EntryType::Set, Some("complete-2")),
+            ],
+        )
+        .await;
+
+        // Simulate a torn write: the frame_len header says 8, but only 3
+        // body bytes landed before the crash.
+        let path = wal_dir.join(format!("00000001.{}", config.wal_extension));
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+        file.write_all(&8u32.to_le_bytes()).await.unwrap();
+        file.write_all(&[1, 2, 3]).await.unwrap();
+        drop(file);
+
+        let wal_manager = WALBuilder::new(&config)
+            .build(BincodeDecoder::new(), BincodeEncoder::new())
+            .await
+            .expect("a torn tail must not prevent startup");
+
+        let payloads: Vec<_> = wal_manager
+            .pending_entries()
+            .iter()
+            .map(|entry| entry.data.clone().unwrap())
+            .collect();
+        assert_eq!(
+            payloads,
+            vec![b"complete-1".to_vec(), b"complete-2".to_vec()],
+            "the complete entries before the torn frame must be replayed, the torn one discarded"
+        );
+    }
+
+    /// #268: a partially written frame header (fewer than 4 non-zero bytes
+    /// landed) in the newest segment is likewise an uncommitted write and
+    /// must be discarded rather than failing startup.
+    #[tokio::test]
+    async fn test_build_discards_partial_frame_header_of_newest_segment() {
+        let wal_dir = setup_test_wal_dir("partial_header_newest_segment").await;
+        let config = get_test_config(&wal_dir);
+        write_wal_file(
+            &config,
+            1,
+            &vec![create_entry(EntryType::Insert, Some("complete"))],
+        )
+        .await;
+
+        let path = wal_dir.join(format!("00000001.{}", config.wal_extension));
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+        file.write_all(&[0xAB, 0xCD]).await.unwrap();
+        drop(file);
+
+        let wal_manager = WALBuilder::new(&config)
+            .build(BincodeDecoder::new(), BincodeEncoder::new())
+            .await
+            .expect("a partial frame header must not prevent startup");
+
+        let payloads: Vec<_> = wal_manager
+            .pending_entries()
+            .iter()
+            .map(|entry| entry.data.clone().unwrap())
+            .collect();
+        assert_eq!(payloads, vec![b"complete".to_vec()]);
+    }
+
     #[tokio::test]
     async fn test_build_rejects_corrupt_intermediate_segment() {
         let wal_dir = setup_test_wal_dir("corrupt_intermediate_segment").await;
@@ -772,7 +894,10 @@ mod tests {
                 .build(BincodeDecoder::new(), BincodeEncoder::new())
                 .await
                 .unwrap_or_else(|error| {
-                    panic!("current behaviour: cut={} was expected to be accepted, got {}", cut, error)
+                    panic!(
+                        "current behaviour: cut={} was expected to be accepted, got {}",
+                        cut, error
+                    )
                 });
             assert_eq!(
                 reopened.pending_entries().len(),
