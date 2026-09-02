@@ -29,6 +29,31 @@ pub(crate) fn row_index_key(row: &TableDataRow, column_name: &str) -> Option<Str
         })
 }
 
+/// 행의 복수 컬럼 값을 복합 인덱스 키 컴포넌트들로 변환합니다 (#220).
+///
+/// 반환값은 `encode_composite_key_component`로 인코딩된 컴포넌트 벡터입니다.
+/// B-tree에 넣을 단일 키는 이 값들을 이어붙이면 됩니다. 각 컴포넌트가 길이
+/// 프리픽스를 가지므로 이어붙인 키는 단사(injective)이며, 컬럼 순서대로
+/// 정렬 순서가 결정됩니다.
+///
+/// 인덱스 대상 컬럼 중 하나라도 NULL이거나 행에 없으면 None — 단일 컬럼
+/// 인덱스와 마찬가지로 해당 행은 색인하지 않습니다 (PostgreSQL과 동일).
+pub(crate) fn row_index_keys(row: &TableDataRow, column_names: &[String]) -> Option<Vec<String>> {
+    let mut components = Vec::with_capacity(column_names.len());
+
+    for column_name in column_names {
+        let key = row_index_key(row, column_name)?;
+        components.push(super::super::index::encode_composite_key_component(&key));
+    }
+
+    Some(components)
+}
+
+/// 복합 인덱스 키 컴포넌트들을 단일 B-tree 키로 합칩니다 (#220).
+pub(crate) fn join_composite_key(components: &[String]) -> String {
+    components.concat()
+}
+
 impl DBEngine {
     /// 서버 기동 후 최초 인덱스 사용 시점에 디스크의 인덱스 파일을 메모리로 적재합니다.
     pub(crate) async fn ensure_indices_loaded(&self) -> errors::Result<()> {
