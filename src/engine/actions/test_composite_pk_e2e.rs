@@ -16,7 +16,8 @@ use crate::engine::{DBEngine, SharedWALManager};
 /// 커버리지:
 /// - 복합 PK 테이블 생성 시 `{table}_pkey` 인덱스 자동 생성
 /// - 복합 키 유니크 강제: 개별 중복 + 배치 중복 거부, 다른 조합은 허용
-/// - 복합 키 조회: PK 선행 컬럼 동등 조건으로 IndexScan
+/// - 복합 키 조회: 옵티마이저가 복합 인덱스 prefix 스캔 미지원이라도
+///   (FullScan 폴백) 정확한 결과 반환 — 특히 큰 테이블에서 회귀 테스트
 /// - UPDATE/DELETE 유지보수
 /// - 재기동 후 persisted index 재적재
 /// - 인덱스 유지보수 실패 시 롤백 (orphan row 없음)
@@ -174,6 +175,67 @@ async fn composite_pk_lookup_returns_exactly_the_matching_rows() {
     .unwrap();
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0].fields[0], ExecuteField::Integer(1));
+}
+
+#[tokio::test]
+async fn composite_pk_lookup_is_correct_on_a_large_table() {
+    // 회귀 테스트: 옵티마이저가 복합 인덱스를 IndexScan 후보에서 제외하지
+    // 않던 시절, 큰 테이블에서 첫 컬럼 동등 조건이 raw eq_key로 인덱스를
+    // 조회해 조건을 만족하는 행을 전부 누락했다 (0행 반환).
+    // prefix 스캔 미지원 복합 인덱스는 FullScan으로 폴백해야 정확하다 (#220).
+    let (engine, wal) = build_test_engine("lookup_large").await;
+    setup_memberships_table(&engine, wal.clone()).await;
+
+    let mut values = String::new();
+    for i in 0..1000 {
+        if i > 0 {
+            values.push_str(", ");
+        }
+        values.push_str(&format!("({}, {})", i, i % 7));
+    }
+
+    execute_sql(
+        &engine,
+        wal.clone(),
+        &format!(
+            "insert into memberships (user_id, group_id) values {};",
+            values
+        ),
+    )
+    .await
+    .unwrap();
+
+    // 첫 컬럼 동등 조건: user_id = 42 → 정확히 1행
+    let result = execute_sql(
+        &engine,
+        wal.clone(),
+        "select group_id from memberships where user_id = 42;",
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.rows.len(), 1, "user_id = 42 must match exactly one row");
+    assert_eq!(result.rows[0].fields[0], ExecuteField::Integer(42 % 7));
+
+    // 존재하지 않는 키: 0행 (과거 버그로는 0행이 정답처럼 보였지만
+    // 존재하는 키도 0행이 나왔었다. 이번엔 존재하는 키가 1행 나오는지가 핵심)
+    let result = execute_sql(
+        &engine,
+        wal.clone(),
+        "select user_id from memberships where user_id = 9999;",
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.rows.len(), 0);
+
+    // 범위 조건도 정확해야 함: 500 <= user_id < 510 → 10행
+    let result = execute_sql(
+        &engine,
+        wal.clone(),
+        "select user_id from memberships where user_id >= 500 and user_id < 510;",
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.rows.len(), 10);
 }
 
 #[tokio::test]
