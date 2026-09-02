@@ -2,35 +2,35 @@
 
 ![](https://img.shields.io/badge/language-Rust-red) ![](https://img.shields.io/badge/version-0.0.3%20alpha-brightgreen) [![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/myyrakle/rrdb/blob/master/LICENSE)
 
-**English** | [한국어](README.ko.md)
-
 Rust-based RDB
 
 ## not complete
 
+[English](README.md) | **한국어**
+
 ---
 
-### Installation
+### 설치
 
-Use cargo.
+cargo를 사용한다.
 
 ```
 cargo install rrdb
 ```
 
-- Platform-specific initialization (Linux)
+- 플랫폼별 초기화 (Linux)
 
-Create a symbolic link and run the initialization.
+심볼릭 링크를 생성하고 초기화를 수행합니다.
 
 ```
 sudo ln -s /home/$USER/.cargo/bin/rrdb /usr/bin/rrdb
 sudo rrdb init # initialize data directory
-sudo rrdb daemon # register daemon
+sudo rrdb daemon # register daemon 
 ```
 
-- Platform-specific initialization (MacOS)
+- 플랫폼별 초기화 (MacOS)
 
-Create a symbolic link and run the initialization.
+심볼릭 링크를 생성하고 초기화를 수행합니다.
 
 ```
 sudo ln -s /home/$USER/.cargo/bin/rrdb /usr/local/bin/rrdb
@@ -38,9 +38,9 @@ sudo rrdb init
 sudo rrdb daemon
 ```
 
-- Platform-specific initialization (Windows)
+- 플랫폼별 초기화 (Windows)
 
-Run PowerShell as administrator and execute the following commands.
+powershell을 관리자 권한으로 실행하고 다음 명령어를 수행합니다.
 
 ```
 mkdir 'C:\Program Files\rrdb'
@@ -50,20 +50,20 @@ cp ~/.cargo/bin/rrdb.exe 'C:\Program Files\rrdb\'
 
 ---
 
-### Basic Usage
+### 기본 사용법
 
 #### Server
 
 ```
-# Initialize storage
+# 스토리지 초기화
 cargo run --bin rrdb init
-# Initialize storage in a specific directory
+# 특정 디렉터리에 스토리지 초기화
 cargo run --bin rrdb init --base-path local-test
-# Register and run the daemon
+# 데몬 등록 및 실행
 cargo run --bin rrdb daemon
-# Run the server
+# 서버 실행
 cargo run --bin rrdb run
-# Run the server with a specific directory
+# 특정 디렉터리 설정으로 서버 실행
 cargo run --bin rrdb run --base-path local-test
 ```
 
@@ -84,34 +84,34 @@ psql -U rrdb -p 22208 --host 0.0.0.0
 
 ### Syntax
 
-1. Keywords are case-insensitive.
-2. Strings are delimited by single quotes ('), and a quote inside a string is escaped by doubling it.
-3. Identifiers can be plain text, or delimited by double quotes (").
+1. 키워드는 대소문자를 구별하지 않습니다.
+2. 문자열은 작은 따옴표(')로 구분되며, 따옴표를 포함시킬 때는 2개를 겹칩니다.
+3. 식별자는 단순 텍스트르로 구성해도 되고, 큰 따옴표(")로 구분해도 됩니다.
 
 #### Database
 
 ```
-# List databases
+# 데이터베이스 리스트업
 SHOW DATABASES;
 ```
 
 ```
-# Create a database
+# 데이터베이스 생성
 CREATE DATABASE "database name";
 ```
 
 ```
-# Drop a database
+# 데이터베이스 삭제
 DROP DATABASE "database name";
 ```
 
 ```
-# Alter a database
+# 데이터베이스 변경
 ALTER DATABASE "from name" rename to "to name";
 ```
 
 ```
-# Change the current database
+# 데이터베이스 변경
 USE "database name";
 or
 \c "database name";
@@ -120,18 +120,18 @@ or
 #### Table
 
 ```
-# List tables
+# 테이블 목록 조회
 SHOW TABLES
 ```
 
 ```
-# Show table details
+# 테이블 상세정보 조회
 DESC "table name"
 ```
 
 ```
-# Create a table
-# (table_constraint will be supported later.)
+# 테이블 생성
+# (table_constraint는 차후 추가할 예정입니다.)
 CREATE TABLE [ IF NOT EXISTS ] "table name"
 (
     [
@@ -142,8 +142,8 @@ CREATE TABLE [ IF NOT EXISTS ] "table name"
     ]
 )
 
-# column_constraint is one of the following forms.
-# (CONSTRAINT, CHECK, UNIQUE, REFERENCES, etc. will be supported later.)
+# column_constraint는 아래 형태 중 하나입니다.
+# (CONSTRAINT나 CHECK, UNIQUE, REFERENCES 등은 차후 추가할 예정입니다.)
 {
     NOT NULL |
     NULL |
@@ -153,7 +153,7 @@ CREATE TABLE [ IF NOT EXISTS ] "table name"
 ```
 
 ```
-# Alter a table
+# 테이블 수정
 
 1. ALTER TABLE [ IF EXISTS ] name
     action
@@ -162,10 +162,10 @@ CREATE TABLE [ IF NOT EXISTS ] "table name"
 3. ALTER TABLE [ IF EXISTS ] name
     RENAME TO new_name
 
-# action is one of the following:
+# action은 다음 중 하나입니다.
 
-1. ADD [ COLUMN ] column_name data_type [ column_constraint [ ... ] ] # [IF NOT EXISTS] syntax to be added later
-2. DROP [ COLUMN ]  column_name # [ IF EXISTS ] syntax to be added later
+1. ADD [ COLUMN ] column_name data_type [ column_constraint [ ... ] ] # 향후 [IF NOT EXISTS] 신택스 추가 필요
+2. DROP [ COLUMN ]  column_name # 향후 [ IF EXISTS ] 신택스 추가 필요
 3. ALTER [ COLUMN ] column_name [ SET DATA ] TYPE data_type
 4. ALTER [ COLUMN ] column_name SET DEFAULT expression
 5. ALTER [ COLUMN ] column_name DROP DEFAULT
@@ -197,7 +197,7 @@ SELECT
 [ LIMIT limit_number ]
 [ OFFSET offset_number ]
 
-from_item is one of the following:
+from_item은 다음 중 하나입니다.
 1. table_name  [ [ AS ] alias ]
 2. ( select ) [ AS ] alias
 ```
