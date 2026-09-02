@@ -4,8 +4,8 @@
 //! - row_index_keys: 복수 컬럼 키 인코딩 (순서 보존, 단사)
 //! - NULL 포함 컬럼 → 인덱스 제외 (PostgreSQL과 동일)
 
-use crate::engine::ast::types::TableName;
 use crate::engine::actions::index::row_index_keys;
+use crate::engine::ast::types::TableName;
 use crate::engine::index::{IndexMeta, field_to_key};
 use crate::engine::schema::row::{TableDataField, TableDataFieldType, TableDataRow};
 
@@ -56,6 +56,8 @@ fn composite_key_is_concatenation_with_unambiguous_boundaries() {
 
 #[test]
 fn composite_key_encoding_is_injective_across_value_shapes() {
+    use crate::engine::actions::index::join_composite_key;
+
     // "S:ab" + "S:c" vs "S:a" + "S:bc" 가 같은 키가 되는 충돌을 막아야 함
     let row_a = TableDataRow {
         fields: vec![
@@ -74,13 +76,17 @@ fn composite_key_encoding_is_injective_across_value_shapes() {
     let keys_b = row_index_keys(&row_b, &["x".to_owned(), "y".to_owned()]).unwrap();
 
     assert_ne!(
-        keys_a.join("|"), keys_b.join("|"),
+        keys_a, keys_b,
         "different value splits must not collide: {:?} vs {:?}",
         keys_a, keys_b
     );
 
-    // 단일 문자열로 합쳐도 충돌 없어야 함 (B-tree 키로 조합 시)
-    assert_ne!(keys_a.concat(), keys_b.concat());
+    // 조합된 B-tree 키도 충돌 없어야 함 (길이 프리픽스 인코딩)
+    assert_ne!(
+        join_composite_key(&keys_a),
+        join_composite_key(&keys_b),
+        "joined composite keys must not collide"
+    );
 }
 
 #[test]
@@ -96,10 +102,10 @@ fn composite_key_preserves_column_order() {
     let ba = row_index_keys(&row, &["b".to_owned(), "a".to_owned()]).unwrap();
 
     assert_ne!(ab, ba, "column order must affect the key");
-    // 컴포넌트는 길이 프리픽스로 인코딩되지만, 원래 필드 키가 포함되어 있어야 함
-    assert!(ab[0].contains(&field_to_key(&TableDataFieldType::Integer(1))));
-    assert!(ab[1].contains(&field_to_key(&TableDataFieldType::Integer(2))));
-    assert!(ba[0].contains(&field_to_key(&TableDataFieldType::Integer(2))));
+    // 컴포넌트는 field_to_key 원본 키
+    assert_eq!(ab[0], field_to_key(&TableDataFieldType::Integer(1)));
+    assert_eq!(ab[1], field_to_key(&TableDataFieldType::Integer(2)));
+    assert_eq!(ba[0], field_to_key(&TableDataFieldType::Integer(2)));
 }
 
 #[test]
@@ -137,8 +143,7 @@ fn test_single_column_row_index_keys_matches_row_index_key() {
     let via_multi = row_index_keys(&row, &["id".to_owned()]).unwrap();
     let via_single = row_index_key(&row, "id").unwrap();
 
-    // 단일 컬럼 복합 키 컴포넌트에는 원래 필드 키가 그대로 포함되어야 함
-    // (길이 프리픽스는 조합 시 충돌 방지용)
-    assert_eq!(via_multi.len(), 1);
-    assert!(via_multi[0].contains(&via_single));
+    // 단일 컬럼 복합 키를 join하면 기존 row_index_key와 정확히 일치해야 함:
+    // 단일 인덱스 경로가 동일 키 공간(옵티마이저 eq_key 포함)을 유지하는 계약 (#220)
+    assert_eq!(join_composite_key(&via_multi), via_single);
 }
