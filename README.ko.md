@@ -1,6 +1,6 @@
 # rrdb
 
-![](https://img.shields.io/badge/language-Rust-red) ![](https://img.shields.io/badge/version-0.0.3%20alpha-brightgreen) [![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/myyrakle/rrdb/blob/master/LICENSE)
+![Rust](https://img.shields.io/badge/language-Rust-red) ![version 0.0.3 alpha](https://img.shields.io/badge/version-0.0.3%20alpha-brightgreen) [![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/myyrakle/rrdb/blob/master/LICENSE)
 
 Rust-based RDB
 
@@ -14,7 +14,7 @@ Rust-based RDB
 
 cargo를 사용한다.
 
-```
+```bash
 cargo install rrdb
 ```
 
@@ -22,7 +22,7 @@ cargo install rrdb
 
 심볼릭 링크를 생성하고 초기화를 수행합니다.
 
-```
+```bash
 sudo ln -s /home/$USER/.cargo/bin/rrdb /usr/bin/rrdb
 sudo rrdb init # initialize data directory
 sudo rrdb daemon # register daemon 
@@ -32,8 +32,8 @@ sudo rrdb daemon # register daemon
 
 심볼릭 링크를 생성하고 초기화를 수행합니다.
 
-```
-sudo ln -s /home/$USER/.cargo/bin/rrdb /usr/local/bin/rrdb
+```bash
+sudo ln -s $HOME/.cargo/bin/rrdb /usr/local/bin/rrdb
 sudo rrdb init
 sudo rrdb daemon
 ```
@@ -42,7 +42,7 @@ sudo rrdb daemon
 
 powershell을 관리자 권한으로 실행하고 다음 명령어를 수행합니다.
 
-```
+```powershell
 mkdir 'C:\Program Files\rrdb'
 cp ~/.cargo/bin/rrdb.exe 'C:\Program Files\rrdb\'
 'C:\Program Files\rrdb\rrdb.exe' init
@@ -54,7 +54,7 @@ cp ~/.cargo/bin/rrdb.exe 'C:\Program Files\rrdb\'
 
 #### Server
 
-```
+```bash
 # 스토리지 초기화
 cargo run --bin rrdb init
 # 특정 디렉터리에 스토리지 초기화
@@ -69,14 +69,14 @@ cargo run --bin rrdb run --base-path local-test
 
 #### Docker
 
-```
+```bash
 docker build -t rrdb:local .
 docker run --rm -p 22208:22208 -v rrdb-data:/var/lib/rrdb rrdb:local
 ```
 
 #### Client
 
-```
+```bash
 psql -U rrdb -p 22208 --host 0.0.0.0
 ```
 
@@ -86,31 +86,31 @@ psql -U rrdb -p 22208 --host 0.0.0.0
 
 1. 키워드는 대소문자를 구별하지 않습니다.
 2. 문자열은 작은 따옴표(')로 구분되며, 따옴표를 포함시킬 때는 2개를 겹칩니다.
-3. 식별자는 단순 텍스트르로 구성해도 되고, 큰 따옴표(")로 구분해도 됩니다.
+3. 식별자는 단순 텍스트로 구성해도 되고, 큰 따옴표(")로 구분해도 됩니다.
 
 #### Database
 
-```
+```sql
 # 데이터베이스 리스트업
 SHOW DATABASES;
 ```
 
-```
+```sql
 # 데이터베이스 생성
 CREATE DATABASE "database name";
 ```
 
-```
+```sql
 # 데이터베이스 삭제
 DROP DATABASE "database name";
 ```
 
-```
+```sql
 # 데이터베이스 변경
 ALTER DATABASE "from name" rename to "to name";
 ```
 
-```
+```sql
 # 데이터베이스 변경
 USE "database name";
 or
@@ -119,17 +119,17 @@ or
 
 #### Table
 
-```
+```sql
 # 테이블 목록 조회
 SHOW TABLES
 ```
 
-```
+```sql
 # 테이블 상세정보 조회
 DESC "table name"
 ```
 
-```
+```sql
 # 테이블 생성
 # (table_constraint는 차후 추가할 예정입니다.)
 CREATE TABLE [ IF NOT EXISTS ] "table name"
@@ -152,7 +152,7 @@ CREATE TABLE [ IF NOT EXISTS ] "table name"
 }
 ```
 
-```
+```sql
 # 테이블 수정
 
 1. ALTER TABLE [ IF EXISTS ] name
@@ -174,19 +174,18 @@ CREATE TABLE [ IF NOT EXISTS ] "table name"
 
 #### Insert
 
-```
+```sql
 INSERT INTO table_name ( column_name [, ...] )
 {
     VALUES ( { expression | DEFAULT } [, ...] ) [, ...]
     |
     select_query
 }
-[, ...] ]
 ```
 
 #### Select
 
-```
+```sql
 SELECT
     [ * | expression [ [ AS ] output_name ] [, ...] ]
 [ FROM from_item [, ...] ]
@@ -204,7 +203,7 @@ from_item은 다음 중 하나입니다.
 
 #### Update
 
-```
+```sql
 UPDATE table_name
 SET { column_name = { expression } } [, ...]
 [ WHERE condition ]
@@ -212,7 +211,7 @@ SET { column_name = { expression } } [, ...]
 
 #### Delete
 
-```
+```sql
 DELETE FROM table_name
 [ WHERE condition ]
 ```

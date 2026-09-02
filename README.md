@@ -1,6 +1,6 @@
 # rrdb
 
-![](https://img.shields.io/badge/language-Rust-red) ![](https://img.shields.io/badge/version-0.0.3%20alpha-brightgreen) [![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/myyrakle/rrdb/blob/master/LICENSE)
+![Rust](https://img.shields.io/badge/language-Rust-red) ![version 0.0.3 alpha](https://img.shields.io/badge/version-0.0.3%20alpha-brightgreen) [![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/myyrakle/rrdb/blob/master/LICENSE)
 
 **English** | [한국어](README.ko.md)
 
@@ -14,7 +14,7 @@ Rust-based RDB
 
 Use cargo.
 
-```
+```bash
 cargo install rrdb
 ```
 
@@ -22,7 +22,7 @@ cargo install rrdb
 
 Create a symbolic link and run the initialization.
 
-```
+```bash
 sudo ln -s /home/$USER/.cargo/bin/rrdb /usr/bin/rrdb
 sudo rrdb init # initialize data directory
 sudo rrdb daemon # register daemon
@@ -32,8 +32,8 @@ sudo rrdb daemon # register daemon
 
 Create a symbolic link and run the initialization.
 
-```
-sudo ln -s /home/$USER/.cargo/bin/rrdb /usr/local/bin/rrdb
+```bash
+sudo ln -s $HOME/.cargo/bin/rrdb /usr/local/bin/rrdb
 sudo rrdb init
 sudo rrdb daemon
 ```
@@ -42,7 +42,7 @@ sudo rrdb daemon
 
 Run PowerShell as administrator and execute the following commands.
 
-```
+```powershell
 mkdir 'C:\Program Files\rrdb'
 cp ~/.cargo/bin/rrdb.exe 'C:\Program Files\rrdb\'
 'C:\Program Files\rrdb\rrdb.exe' init
@@ -54,7 +54,7 @@ cp ~/.cargo/bin/rrdb.exe 'C:\Program Files\rrdb\'
 
 #### Server
 
-```
+```bash
 # Initialize storage
 cargo run --bin rrdb init
 # Initialize storage in a specific directory
@@ -69,14 +69,14 @@ cargo run --bin rrdb run --base-path local-test
 
 #### Docker
 
-```
+```bash
 docker build -t rrdb:local .
 docker run --rm -p 22208:22208 -v rrdb-data:/var/lib/rrdb rrdb:local
 ```
 
 #### Client
 
-```
+```bash
 psql -U rrdb -p 22208 --host 0.0.0.0
 ```
 
@@ -90,27 +90,27 @@ psql -U rrdb -p 22208 --host 0.0.0.0
 
 #### Database
 
-```
+```sql
 # List databases
 SHOW DATABASES;
 ```
 
-```
+```sql
 # Create a database
 CREATE DATABASE "database name";
 ```
 
-```
+```sql
 # Drop a database
 DROP DATABASE "database name";
 ```
 
-```
+```sql
 # Alter a database
 ALTER DATABASE "from name" rename to "to name";
 ```
 
-```
+```sql
 # Change the current database
 USE "database name";
 or
@@ -119,17 +119,17 @@ or
 
 #### Table
 
-```
+```sql
 # List tables
 SHOW TABLES
 ```
 
-```
+```sql
 # Show table details
 DESC "table name"
 ```
 
-```
+```sql
 # Create a table
 # (table_constraint will be supported later.)
 CREATE TABLE [ IF NOT EXISTS ] "table name"
@@ -152,7 +152,7 @@ CREATE TABLE [ IF NOT EXISTS ] "table name"
 }
 ```
 
-```
+```sql
 # Alter a table
 
 1. ALTER TABLE [ IF EXISTS ] name
@@ -174,19 +174,18 @@ CREATE TABLE [ IF NOT EXISTS ] "table name"
 
 #### Insert
 
-```
+```sql
 INSERT INTO table_name ( column_name [, ...] )
 {
     VALUES ( { expression | DEFAULT } [, ...] ) [, ...]
     |
     select_query
 }
-[, ...] ]
 ```
 
 #### Select
 
-```
+```sql
 SELECT
     [ * | expression [ [ AS ] output_name ] [, ...] ]
 [ FROM from_item [, ...] ]
@@ -204,7 +203,7 @@ from_item is one of the following:
 
 #### Update
 
-```
+```sql
 UPDATE table_name
 SET { column_name = { expression } } [, ...]
 [ WHERE condition ]
@@ -212,7 +211,7 @@ SET { column_name = { expression } } [, ...]
 
 #### Delete
 
-```
+```sql
 DELETE FROM table_name
 [ WHERE condition ]
 ```
