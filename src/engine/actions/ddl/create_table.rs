@@ -76,7 +76,7 @@ impl DBEngine {
 
         if !primary_key_columns.is_empty() {
             if let Err(error) = self.ensure_indices_loaded().await {
-                let _ = tokio::fs::remove_dir_all(&table_path).await;
+                let _ = self.file_system.remove_dir_all(&table_path).await;
                 return Err(error);
             }
 
@@ -89,7 +89,7 @@ impl DBEngine {
             );
 
             if let Err(error) = self.index_manager.create_index(meta).await {
-                let _ = tokio::fs::remove_dir_all(&table_path).await;
+                let _ = self.file_system.remove_dir_all(&table_path).await;
                 return Err(error);
             }
         }

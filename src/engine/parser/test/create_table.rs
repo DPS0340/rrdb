@@ -156,6 +156,61 @@ pub fn create_table_rejects_primary_key_referencing_unknown_column() {
     );
 }
 
+/// PK 목록의 문법 오류(쉼표 위치)를 거부해야 합니다 (#220, CodeRabbit)
+#[test]
+pub fn create_table_rejects_primary_key_comma_syntax_errors() {
+    let cases = [
+        "CREATE TABLE t (a INTEGER, PRIMARY KEY (,a));", // 선두 쉼표
+        "CREATE TABLE t (a INTEGER, PRIMARY KEY (a,));", // 후행 쉼표
+        "CREATE TABLE t (a INTEGER, PRIMARY KEY (a,,b));", // 연속 쉼표
+        "CREATE TABLE t (a INTEGER, PRIMARY KEY (a b));", // 쉼표 누락
+    ];
+
+    for text in cases {
+        let mut parser = Parser::with_string(text.to_owned()).unwrap();
+        assert!(
+            parser.parse(ParserContext::default()).is_err(),
+            "should reject: {}",
+            text
+        );
+    }
+}
+
+/// 테이블 레벨 PK 뒤에 이상한 토큰이 남으면 에러 (#220, CodeRabbit)
+#[test]
+pub fn create_table_rejects_trailing_tokens_after_table_level_primary_key() {
+    let text = r#"
+        CREATE TABLE "test_db".t
+        (
+            a INTEGER,
+            PRIMARY KEY (a)
+        ) unexpected;
+    "#
+    .to_owned();
+
+    let mut parser = Parser::with_string(text).unwrap();
+
+    assert!(parser.parse(ParserContext::default()).is_err());
+}
+
+/// 테이블 레벨 PK + 세미콜론 없는 종료(EOF)는 정상 파싱 (#220)
+#[test]
+pub fn create_table_accepts_table_level_primary_key_without_semicolon() {
+    let text = r#"
+        CREATE TABLE "test_db".t
+        (
+            a INTEGER,
+            PRIMARY KEY (a)
+        )
+    "#
+    .to_owned();
+
+    let mut parser = Parser::with_string(text).unwrap();
+
+    let statements = parser.parse(ParserContext::default()).unwrap();
+    assert_eq!(statements.len(), 1);
+}
+
 #[test]
 pub fn create_table() {
     let text = r#"

@@ -24,9 +24,9 @@ use crate::engine::{DBEngine, SharedWALManager};
 
 async fn build_test_engine(test_name: &str) -> (DBEngine, SharedWALManager) {
     let base_path = PathBuf::from("target/test_composite_pk").join(test_name);
-    if base_path.exists() {
-        tokio::fs::remove_dir_all(&base_path).await.unwrap();
-    }
+
+    // 남은 이전 실행 정리 — remove_dir_all은 존재하지 않아도 실패를 신경 쓰지 않음
+    let _ = tokio::fs::remove_dir_all(&base_path).await;
 
     let config = LaunchConfig::default_for_base_path(&base_path);
     tokio::fs::create_dir_all(&config.data_directory)
@@ -139,7 +139,10 @@ async fn composite_pk_rejects_duplicate_key_combinations() {
     .await
     .expect("different combination with reused group_id must be accepted");
 
-    assert_eq!(engine.full_scan(memberships_table()).await.unwrap().len(), 3);
+    assert_eq!(
+        engine.full_scan(memberships_table()).await.unwrap().len(),
+        3
+    );
 }
 
 #[tokio::test]
@@ -213,7 +216,11 @@ async fn composite_pk_lookup_is_correct_on_a_large_table() {
     )
     .await
     .unwrap();
-    assert_eq!(result.rows.len(), 1, "user_id = 42 must match exactly one row");
+    assert_eq!(
+        result.rows.len(),
+        1,
+        "user_id = 42 must match exactly one row"
+    );
     assert_eq!(result.rows[0].fields[0], ExecuteField::Integer(42 % 7));
 
     // 존재하지 않는 키: 0행 (과거 버그로는 0행이 정답처럼 보였지만
@@ -296,7 +303,10 @@ async fn composite_pk_maintains_index_across_update_and_delete() {
         "update memberships set user_id = 2, group_id = 3 where user_id = 1 and group_id = 1;",
     )
     .await;
-    assert!(conflict.is_err(), "duplicate combination via update must fail");
+    assert!(
+        conflict.is_err(),
+        "duplicate combination via update must fail"
+    );
 
     // DELETE: 인덱스 항목 제거
     execute_sql(

@@ -90,6 +90,9 @@ impl Parser {
                     }
 
                     let mut columns: Vec<String> = vec![];
+                    // 식별자와 쉼표가 교대로 와야 합니다 (#220):
+                    // PRIMARY KEY (a, b) O, (,a) / (a,) / (a,,b) X
+                    let mut expect_identifier = true;
 
                     loop {
                         if !self.has_next_token() {
@@ -99,10 +102,32 @@ impl Parser {
                         let current_token = self.get_next_token();
 
                         match current_token {
-                            Token::RightParentheses => break,
-                            Token::Comma => continue,
+                            Token::RightParentheses => {
+                                if expect_identifier && !columns.is_empty() {
+                                    return Err(ParsingError::wrap(
+                                        "trailing comma in 'PRIMARY KEY (...)'".to_string(),
+                                    ));
+                                }
+                                break;
+                            }
+                            Token::Comma => {
+                                if expect_identifier {
+                                    return Err(ParsingError::wrap(
+                                        "expected column name in 'PRIMARY KEY (...)'. but your input word is 'Comma'"
+                                            .to_string(),
+                                    ));
+                                }
+                                expect_identifier = true;
+                            }
                             Token::Identifier(column_name) => {
+                                if !expect_identifier {
+                                    return Err(ParsingError::wrap(format!(
+                                        "expected ',' or ')' after column name in 'PRIMARY KEY (...)'. but your input word is '{:?}'",
+                                        column_name
+                                    )));
+                                }
                                 columns.push(column_name);
+                                expect_identifier = false;
                             }
                             _ => {
                                 return Err(ParsingError::wrap(format!(
@@ -170,6 +195,21 @@ impl Parser {
                         )));
                     }
                 }
+            }
+
+            // 문장 종료 검증은 일반 경로와 동일하게 적용합니다 (#220):
+            // 테이블 레벨 PK 뒤에 이상한 토큰이 남으면 에러.
+            if !self.has_next_token() {
+                return Ok(query);
+            }
+
+            let current_token = self.get_next_token();
+
+            if Token::SemiColon != current_token {
+                return Err(ParsingError::wrap(format!(
+                    "expected ';'. but your input word is '{:?}'",
+                    current_token
+                )));
             }
 
             return Ok(query);
